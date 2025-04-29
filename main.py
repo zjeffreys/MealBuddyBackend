@@ -218,18 +218,96 @@ async def webhook_received(request: Request):
     event_type = event['type']
     data_object = event['data']['object']
 
-    print(f'Event type: {event_type}')
+    logger.info(f'Event type: {event_type}')
 
     if event_type == 'checkout.session.completed':
-        print('🔔 Payment succeeded!')
+        logger.info('🔔 Payment succeeded!')
+        # Handle successful checkout session
+        user_id = data_object.get('client_reference_id')
+        subscription_id = data_object.get('subscription')
+        start_date = data_object.get('created')
+
+        if user_id and subscription_id:
+            # Insert subscription into the database
+            response = requests.post(
+                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
+                headers=headers,
+                json={
+                    "id": subscription_id,
+                    "user_id": user_id,
+                    "start_date": start_date,
+                    "status": "active"
+                }
+            )
+            if response.status_code not in [200, 201]:
+                logger.error(f"Failed to insert subscription: {response.text}")
+
     elif event_type == 'customer.subscription.trial_will_end':
-        print('Subscription trial will end')
+        logger.info('Subscription trial will end')
+        subscription_id = data_object.get('id')
+
+        if subscription_id:
+            # Update subscription status in the database
+            response = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
+                headers=headers,
+                json={"status": "trial_will_end"},
+                params={"id": f"eq.{subscription_id}"}
+            )
+            if response.status_code not in [200, 204]:
+                logger.error(f"Failed to update subscription: {response.text}")
+
     elif event_type == 'customer.subscription.created':
-        print(f'Subscription created: {data_object}')
+        logger.info(f'Subscription created: {data_object}')
+        subscription_id = data_object.get('id')
+        user_id = data_object.get('customer')
+        start_date = data_object.get('start_date')
+
+        if subscription_id and user_id:
+            # Insert subscription into the database
+            response = requests.post(
+                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
+                headers=headers,
+                json={
+                    "id": subscription_id,
+                    "user_id": user_id,
+                    "start_date": start_date,
+                    "status": "active"
+                }
+            )
+            if response.status_code not in [200, 201]:
+                logger.error(f"Failed to insert subscription: {response.text}")
+
     elif event_type == 'customer.subscription.updated':
-        print(f'Subscription updated: {data_object}')
+        logger.info(f'Subscription updated: {data_object}')
+        subscription_id = data_object.get('id')
+        status = data_object.get('status')
+
+        if subscription_id:
+            # Update subscription status in the database
+            response = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
+                headers=headers,
+                json={"status": status},
+                params={"id": f"eq.{subscription_id}"}
+            )
+            if response.status_code not in [200, 204]:
+                logger.error(f"Failed to update subscription: {response.text}")
+
     elif event_type == 'customer.subscription.deleted':
-        print(f'Subscription canceled: {data_object}')
+        logger.info(f'Subscription canceled: {data_object}')
+        subscription_id = data_object.get('id')
+
+        if subscription_id:
+            # Update subscription status in the database
+            response = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
+                headers=headers,
+                json={"status": "canceled"},
+                params={"id": f"eq.{subscription_id}"}
+            )
+            if response.status_code not in [200, 204]:
+                logger.error(f"Failed to update subscription: {response.text}")
 
     return {"status": "success"}
 
