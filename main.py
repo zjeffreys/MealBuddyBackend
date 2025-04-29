@@ -18,10 +18,15 @@ load_dotenv()
 
 app = FastAPI()
 
-# Add CORS middleware
+# Update CORS middleware to allow requests from the frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust this to restrict origins in production
+    allow_origins=[
+        "http://localhost:3000", 
+        "https://mealbuddyfrontend.com", 
+        "https://meal-buddy-gold.vercel.app",
+        "https://mealprepme.com"
+    ],  # Add your frontend origins here
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
