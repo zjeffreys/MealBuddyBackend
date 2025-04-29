@@ -204,110 +204,98 @@ async def customer_portal(body: dict):
 async def webhook_received(request: Request):
     webhook_secret = os.getenv('STRIPE_WEBHOOK_SECRET')
     if not webhook_secret:
-        raise ValueError("STRIPE_WEBHOOK_SECRET environment variable is not set")
-    payload = await request.body()
+        logger.error("STRIPE_WEBHOOK_SECRET environment variable is not set")
+        raise HTTPException(status_code=500, detail="Webhook secret not configured.")
+
+    payload = await request.body()  # Ensure raw body is used
     sig_header = request.headers.get('stripe-signature')
+
+    if not sig_header:
+        logger.error("Missing stripe-signature header.")
+        raise HTTPException(status_code=400, detail="Missing stripe-signature header.")
 
     try:
         event = stripe.Webhook.construct_event(
             payload=payload, sig_header=sig_header, secret=webhook_secret
         )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Invalid payload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid payload.")
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Invalid signature: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature.")
 
     event_type = event['type']
     data_object = event['data']['object']
 
-    logger.info(f'Event type: {event_type}')
+    logger.info(f"Received event type: {event_type}")
 
-    if event_type == 'checkout.session.completed':
-        logger.info('🔔 Payment succeeded!')
-        # Handle successful checkout session
-        user_id = data_object.get('client_reference_id')
-        subscription_id = data_object.get('subscription')
-        start_date = data_object.get('created')
+    try:
+        if event_type == 'checkout.session.completed':
+            # Add or update subscription in the user_subscriptions table
+            session_id = data_object['id']
+            customer_id = data_object['customer']
+            subscription_id = data_object.get('subscription', None)
+            start_date = data_object.get('created', None)
 
-        if user_id and subscription_id:
-            # Insert subscription into the database
-            response = requests.post(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers=headers,
-                json={
+            # Check if the subscription already exists
+            subscription_check_response = requests.get(f"{SUPABASE_URL}/rest/v1/user_subscriptions", headers=headers, params={"id": f"eq.{subscription_id}"})
+
+            if subscription_check_response.status_code == 200 and subscription_check_response.json():
+                logger.info(f"Subscription already exists: {subscription_id}")
+            else:
+                # Add new subscription to the user_subscriptions table
+                subscription_data = {
                     "id": subscription_id,
-                    "user_id": user_id,
+                    "user_id": customer_id,
                     "start_date": start_date,
                     "status": "active"
                 }
-            )
-            if response.status_code not in [200, 201]:
-                logger.error(f"Failed to insert subscription: {response.text}")
+                subscription_add_response = requests.post(f"{SUPABASE_URL}/rest/v1/user_subscriptions", headers=headers, json=subscription_data)
 
-    elif event_type == 'customer.subscription.trial_will_end':
-        logger.info('Subscription trial will end')
-        subscription_id = data_object.get('id')
+                if subscription_add_response.status_code not in [200, 201]:
+                    logger.error(f"Failed to add subscription to Supabase: {subscription_add_response.text}")
+                    raise HTTPException(status_code=500, detail="Failed to add subscription to database.")
 
-        if subscription_id:
-            # Update subscription status in the database
-            response = requests.patch(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers=headers,
-                json={"status": "trial_will_end"},
-                params={"id": f"eq.{subscription_id}"}
-            )
-            if response.status_code not in [200, 204]:
-                logger.error(f"Failed to update subscription: {response.text}")
+                logger.info(f"Subscription added to Supabase: {subscription_data}")
 
-    elif event_type == 'customer.subscription.created':
-        logger.info(f'Subscription created: {data_object}')
-        subscription_id = data_object.get('id')
-        user_id = data_object.get('customer')
-        start_date = data_object.get('start_date')
+        elif event_type == 'customer.subscription.trial_will_end':
+            logger.info('Subscription trial will end')
+        elif event_type == 'customer.subscription.created':
+            logger.info(f'Subscription created: {data_object}')
+        elif event_type == 'customer.subscription.updated':
+            logger.info(f'Subscription updated: {data_object}')
+        elif event_type == 'customer.subscription.deleted':
+            logger.info(f'Subscription canceled: {data_object}')
+        elif event_type == 'customer.created':
+            # Add or update user in the users table
+            user_id = data_object['id']
+            user_email = data_object.get('email', 'unknown')
 
-        if subscription_id and user_id:
-            # Insert subscription into the database
-            response = requests.post(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers=headers,
-                json={
-                    "id": subscription_id,
-                    "user_id": user_id,
-                    "start_date": start_date,
-                    "status": "active"
+            # Check if the user already exists
+            user_check_response = requests.get(f"{SUPABASE_URL}/rest/v1/users", headers=headers, params={"id": f"eq.{user_id}"})
+
+            if user_check_response.status_code == 200 and user_check_response.json():
+                logger.info(f"User already exists: {user_id}")
+            else:
+                # Add new user to the users table
+                user_data = {
+                    "id": user_id,
+                    "email": user_email,
+                    "created_at": data_object.get('created', None)
                 }
-            )
-            if response.status_code not in [200, 201]:
-                logger.error(f"Failed to insert subscription: {response.text}")
+                user_add_response = requests.post(f"{SUPABASE_URL}/rest/v1/users", headers=headers, json=user_data)
 
-    elif event_type == 'customer.subscription.updated':
-        logger.info(f'Subscription updated: {data_object}')
-        subscription_id = data_object.get('id')
-        status = data_object.get('status')
+                if user_add_response.status_code not in [200, 201]:
+                    logger.error(f"Failed to add user to Supabase: {user_add_response.text}")
+                    raise HTTPException(status_code=500, detail="Failed to add user to database.")
 
-        if subscription_id:
-            # Update subscription status in the database
-            response = requests.patch(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers=headers,
-                json={"status": status},
-                params={"id": f"eq.{subscription_id}"}
-            )
-            if response.status_code not in [200, 204]:
-                logger.error(f"Failed to update subscription: {response.text}")
-
-    elif event_type == 'customer.subscription.deleted':
-        logger.info(f'Subscription canceled: {data_object}')
-        subscription_id = data_object.get('id')
-
-        if subscription_id:
-            # Update subscription status in the database
-            response = requests.patch(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers=headers,
-                json={"status": "canceled"},
-                params={"id": f"eq.{subscription_id}"}
-            )
-            if response.status_code not in [200, 204]:
-                logger.error(f"Failed to update subscription: {response.text}")
+                logger.info(f"User added to Supabase: {user_data}")
+        else:
+            logger.warning(f"Unhandled event type: {event_type}")
+    except Exception as e:
+        logger.error(f"Error handling event {event_type}: {e}")
+        raise HTTPException(status_code=500, detail="Error handling event.")
 
     return {"status": "success"}
 
