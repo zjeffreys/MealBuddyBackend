@@ -1,18 +1,43 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException, Request, Form
 import numpy as np
 import requests
 import os
 from dotenv import load_dotenv
 from openai import OpenAI
+import stripe
+import logging
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+
+# Configure logging to include debug information
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("uvicorn")
 
 # Load environment variables
 load_dotenv()
 
 app = FastAPI()
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust this to restrict origins in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+stripe.api_key = os.getenv('STRIPE_SECRET_KEY')
+YOUR_DOMAIN = os.getenv('YOUR_DOMAIN')
+
+# Debugging: Log the Stripe Secret Key to ensure it is loaded
+if stripe.api_key:
+    logger.info("Stripe Secret Key loaded successfully.")
+else:
+    logger.error("Stripe Secret Key is not set. Check your .env file.")
 
 if not SUPABASE_URL or not SUPABASE_ANON_KEY or not OPENAI_API_KEY:
     raise ValueError("Environment variables SUPABASE_URL, SUPABASE_ANON_KEY, or OPENAI_API_KEY are not set")
@@ -24,6 +49,14 @@ headers = {
 
 # Initialize OpenAI client
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Application startup complete.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Application shutdown complete.")
 
 @app.post("/generate_meal_embeddings")
 def generate_meal_embeddings():
@@ -97,3 +130,100 @@ def search_meals(query: str):
     results = sorted(results, key=lambda x: x["similarity"], reverse=True)
 
     return results[:5]
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(body: dict):
+    try:
+        product_id = body.get("product_id")
+        coupon_code = body.get("coupon_code")
+
+        if not product_id:
+            raise HTTPException(status_code=400, detail="Missing product_id in request body.")
+
+        logger.info(f"Received product_id: {product_id}")
+        if coupon_code:
+            logger.info(f"Received coupon_code: {coupon_code}")
+
+        # Step 1: Retrieve product prices
+        logger.info("Retrieving prices from Stripe.")
+        prices = stripe.Price.list(
+            product=product_id,
+            expand=['data.product']
+        )
+        logger.info(f"Prices retrieved: {prices}")
+
+        # Step 2: Create checkout session
+        logger.info("Creating checkout session.")
+        checkout_session = stripe.checkout.Session.create(
+            line_items=[
+                {
+                    'price': prices.data[0].id,
+                    'quantity': 1,
+                },
+            ],
+            discounts=[
+                {
+                    'coupon': coupon_code
+                }
+            ] if coupon_code else None,
+            allow_promotion_codes=True,  # Enable promo code input at checkout
+            mode='subscription',
+            success_url=YOUR_DOMAIN +
+            '?success=true&session_id={CHECKOUT_SESSION_ID}',
+            cancel_url=YOUR_DOMAIN + '?canceled=true',
+        )
+        logger.info(f"Checkout session created: {checkout_session}")
+
+        return JSONResponse(content={"url": checkout_session.url})
+    except Exception as e:
+        logger.error(f"Error during create-checkout-session process: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/create-portal-session")
+async def customer_portal(body: dict):
+    try:
+        checkout_session_id = body.get('session_id')
+        checkout_session = stripe.checkout.Session.retrieve(checkout_session_id)
+
+        return_url = YOUR_DOMAIN
+
+        portal_session = stripe.billing_portal.Session.create(
+            customer=checkout_session.customer,
+            return_url=return_url,
+        )
+        return JSONResponse(content={"url": portal_session.url})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/webhook")
+async def webhook_received(request: Request):
+    webhook_secret = os.getenv('STRIPE_WEBHOOK_SECRET')
+    if not webhook_secret:
+        raise ValueError("STRIPE_WEBHOOK_SECRET environment variable is not set")
+    payload = await request.body()
+    sig_header = request.headers.get('stripe-signature')
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=payload, sig_header=sig_header, secret=webhook_secret
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    event_type = event['type']
+    data_object = event['data']['object']
+
+    print(f'Event type: {event_type}')
+
+    if event_type == 'checkout.session.completed':
+        print('🔔 Payment succeeded!')
+    elif event_type == 'customer.subscription.trial_will_end':
+        print('Subscription trial will end')
+    elif event_type == 'customer.subscription.created':
+        print(f'Subscription created: {data_object}')
+    elif event_type == 'customer.subscription.updated':
+        print(f'Subscription updated: {data_object}')
+    elif event_type == 'customer.subscription.deleted':
+        print(f'Subscription canceled: {data_object}')
+
+    return {"status": "success"}
