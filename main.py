@@ -141,13 +141,11 @@ async def create_checkout_session(body: dict):
     try:
         product_id = body.get("product_id")
         coupon_code = body.get("coupon_code")
-        user_id = body.get("user_id")  # Ensure user_id is passed in the request body
 
-        if not product_id or not user_id:
-            raise HTTPException(status_code=400, detail="Missing product_id or user_id in request body.")
+        if not product_id:
+            raise HTTPException(status_code=400, detail="Missing product_id in request body.")
 
         logger.info(f"Received product_id: {product_id}")
-        logger.info(f"Received user_id: {user_id}")
         if coupon_code:
             logger.info(f"Received coupon_code: {coupon_code}")
 
@@ -159,7 +157,12 @@ async def create_checkout_session(body: dict):
         )
         logger.info(f"Prices retrieved: {prices}")
 
-        # Step 2: Create checkout session
+        # Step 2: Create a new customer in Stripe
+        logger.info("Creating a new customer in Stripe.")
+        customer = stripe.Customer.create()
+        logger.info(f"Customer created: {customer}")
+
+        # Step 3: Create checkout session
         logger.info("Creating checkout session.")
         checkout_session = stripe.checkout.Session.create(
             line_items=[
@@ -178,7 +181,7 @@ async def create_checkout_session(body: dict):
             success_url=YOUR_DOMAIN +
             '?success=true&session_id={CHECKOUT_SESSION_ID}',
             cancel_url=YOUR_DOMAIN + '?canceled=true',
-            client_reference_id=user_id  # Set the client_reference_id to the user_id
+            customer=customer.id  # Use the newly created customer ID
         )
         logger.info(f"Checkout session created: {checkout_session}")
 
@@ -225,7 +228,7 @@ async def webhook_received(request: Request):
 
     if event_type == 'customer.created':
         logger.info('🔔 Customer created!')
-        customer_id = data_object.get('id')
+        customer_id = data_object.get('id')  # Use the customer ID directly
         email = data_object.get('email')
         name = data_object.get('name')
 
@@ -247,12 +250,11 @@ async def webhook_received(request: Request):
 
     elif event_type == 'checkout.session.completed':
         logger.info('🔔 Payment succeeded!')
-        user_id = data_object.get('client_reference_id')
-        customer_id = data_object.get('customer')
+        customer_id = data_object.get('customer')  # Use the customer ID directly
         subscription_id = data_object.get('subscription')
         start_date = data_object.get('created')
 
-        if not user_id and customer_id:
+        if customer_id and subscription_id:
             # Fetch user_id from the database using the customer_id
             response = requests.get(
                 f"{SUPABASE_URL}/rest/v1/users",
@@ -262,24 +264,25 @@ async def webhook_received(request: Request):
             if response.status_code == 200 and response.json():
                 user_id = response.json()[0].get("id")
 
-        if user_id and subscription_id:
-            # Insert subscription into the database
-            response = requests.post(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers=headers,
-                json={
-                    "id": subscription_id,
-                    "user_id": user_id,
-                    "start_date": start_date,
-                    "status": "active"
-                }
-            )
-            if response.status_code in [200, 201]:
-                logger.info(f"Successfully inserted subscription: {response.json()}")
+                # Insert subscription into the database
+                response = requests.post(
+                    f"{SUPABASE_URL}/rest/v1/user_subscriptions",
+                    headers=headers,
+                    json={
+                        "id": subscription_id,
+                        "user_id": user_id,
+                        "start_date": start_date,
+                        "status": "active"
+                    }
+                )
+                if response.status_code in [200, 201]:
+                    logger.info(f"Successfully inserted subscription: {response.json()}")
+                else:
+                    logger.error(f"Failed to insert subscription: {response.text}")
             else:
-                logger.error(f"Failed to insert subscription: {response.text}")
+                logger.error("User not found for the given customer ID.")
         else:
-            logger.error("Missing user_id or subscription_id in checkout.session.completed event.")
+            logger.error("Missing customer_id or subscription_id in checkout.session.completed event.")
 
     elif event_type == 'customer.subscription.trial_will_end':
         logger.info('Subscription trial will end')
