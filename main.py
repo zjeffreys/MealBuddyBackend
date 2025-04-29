@@ -239,7 +239,9 @@ async def webhook_received(request: Request):
                     "status": "active"
                 }
             )
-            if response.status_code not in [200, 201]:
+            if response.status_code in [200, 201]:
+                logger.info(f"Successfully inserted subscription: {response.json()}")
+            else:
                 logger.error(f"Failed to insert subscription: {response.text}")
 
     elif event_type == 'customer.subscription.trial_will_end':
@@ -275,7 +277,9 @@ async def webhook_received(request: Request):
                     "status": "active"
                 }
             )
-            if response.status_code not in [200, 201]:
+            if response.status_code in [200, 201]:
+                logger.info(f"Successfully inserted subscription: {response.json()}")
+            else:
                 logger.error(f"Failed to insert subscription: {response.text}")
 
     elif event_type == 'customer.subscription.updated':
