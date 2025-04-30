@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import stripe
 import logging
+import uuid
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -62,6 +63,10 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("Application shutdown complete.")
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to MealBuddy Backend!"}
 
 @app.post("/generate_meal_embeddings")
 def generate_meal_embeddings():
@@ -139,67 +144,70 @@ def search_meals(query: str):
 @app.post("/create-checkout-session")
 async def create_checkout_session(body: dict):
     try:
+        user_id = body.get("user_id")
         product_id = body.get("product_id")
-        coupon_code = body.get("coupon_code")
-        email = body.get("email")
-        name = body.get("name")
 
-        if not product_id or not email:
-            raise HTTPException(status_code=400, detail="Missing product_id or email in request body.")
+        if not user_id or not product_id:
+            raise HTTPException(status_code=400, detail="Missing user_id or product_id in request body.")
 
+        # Convert user_id to UUID
+        try:
+            user_id = str(uuid.UUID(user_id))
+        except ValueError:
+            logger.error("Invalid user_id format. Must be a valid UUID.")
+            raise HTTPException(status_code=400, detail="Invalid user_id format. Must be a valid UUID.")
+
+        logger.info(f"Received user_id: {user_id}")
         logger.info(f"Received product_id: {product_id}")
-        logger.info(f"Received email: {email}")
-        if coupon_code:
-            logger.info(f"Received coupon_code: {coupon_code}")
 
-        # Step 1: Create a customer in the database
-        logger.info("Creating a customer in the database.")
-        db_customer_response = requests.post(
-            f"{SUPABASE_URL}/rest/v1/users",
+        # Step 1: Fetch user profile from the database using user_id
+        logger.info("Fetching user profile from the database.")
+        user_profile_response = requests.get(
+            f"{SUPABASE_URL}/rest/v1/user_profiles",
             headers=headers,
-            json={
-                "email": email,
-                "name": name
-            }
+            params={"id": f"eq.{user_id}"}  # Use 'id' field in user_profiles table
         )
-        if db_customer_response.status_code not in [200, 201]:
-            logger.error(f"Failed to create customer in database: {db_customer_response.text}")
-            raise HTTPException(status_code=500, detail="Failed to create customer in database.")
+        if user_profile_response.status_code != 200 or not user_profile_response.json():
+            logger.error(f"Failed to fetch user profile from database: {user_profile_response.text}")
+            raise HTTPException(status_code=404, detail="User profile not found in database.")
 
-        db_customer = db_customer_response.json()
-        db_customer_id = db_customer["id"]
-        logger.info(f"Database customer created with ID: {db_customer_id}")
+        user_profile = user_profile_response.json()[0]
+        name = user_profile.get("name", "Unknown User")
 
-        # Step 2: Create a new customer in Stripe
-        logger.info("Creating a new customer in Stripe.")
-        stripe_customer = stripe.Customer.create(
-            email=email,
-            name=name,
-            metadata={"db_customer_id": db_customer_id}
-        )
-        logger.info(f"Stripe customer created: {stripe_customer}")
+        # Step 2: Create a new customer in Stripe if not already created
+        stripe_customer_id = user_profile.get("stripe_customer_id")
+        if not stripe_customer_id:
+            logger.info("Creating a new customer in Stripe.")
+            stripe_customer = stripe.Customer.create(
+                name=name,
+                metadata={"db_user_id": user_id}
+            )
+            stripe_customer_id = stripe_customer.id
 
-        # Step 3: Update the database with the Stripe customer ID
-        logger.info("Updating the database with the Stripe customer ID.")
-        update_response = requests.patch(
-            f"{SUPABASE_URL}/rest/v1/users",
-            headers=headers,
-            json={"stripe_customer_id": stripe_customer.id},
-            params={"id": f"eq.{db_customer_id}"}
-        )
-        if update_response.status_code not in [200, 204]:
-            logger.error(f"Failed to update customer in database: {update_response.text}")
-            raise HTTPException(status_code=500, detail="Failed to update customer in database.")
+            # Update the database with the Stripe customer ID
+            logger.info("Updating the database with the Stripe customer ID.")
+            update_response = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/user_profiles",
+                headers=headers,
+                json={"stripe_customer_id": stripe_customer_id},
+                params={"id": f"eq.{user_id}"}
+            )
+            if update_response.status_code not in [200, 204]:
+                logger.error(f"Failed to update user profile in database: {update_response.text}")
+                raise HTTPException(status_code=500, detail="Failed to update user profile in database.")
 
-        # Step 4: Retrieve product prices
+        # Step 3: Retrieve product prices
         logger.info("Retrieving prices from Stripe.")
         prices = stripe.Price.list(
             product=product_id,
             expand=['data.product']
         )
+        if not prices.data:
+            raise HTTPException(status_code=404, detail="Product not found in Stripe.")
+
         logger.info(f"Prices retrieved: {prices}")
 
-        # Step 5: Create checkout session
+        # Step 4: Create checkout session
         logger.info("Creating checkout session.")
         checkout_session = stripe.checkout.Session.create(
             line_items=[
@@ -208,18 +216,12 @@ async def create_checkout_session(body: dict):
                     'quantity': 1,
                 },
             ],
-            discounts=[
-                {
-                    'coupon': coupon_code
-                }
-            ] if coupon_code else None,
             allow_promotion_codes=True,  # Enable promo code input at checkout
             mode='subscription',
-            success_url=YOUR_DOMAIN +
-            '?success=true&session_id={CHECKOUT_SESSION_ID}',
+            success_url=YOUR_DOMAIN + '?success=true&session_id={CHECKOUT_SESSION_ID}',
             cancel_url=YOUR_DOMAIN + '?canceled=true',
-            customer=stripe_customer.id,  # Use the newly created Stripe customer ID
-            client_reference_id=db_customer_id  # Attach the database customer ID
+            customer=stripe_customer_id,  # Use the Stripe customer ID
+            client_reference_id=user_id  # Attach the database user ID
         )
         logger.info(f"Checkout session created: {checkout_session}")
 
