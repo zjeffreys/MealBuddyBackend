@@ -289,12 +289,72 @@ async def webhook_received(request: Request):
                 logger.error(f"Failed to insert/update user: {response.text}")
 
     elif event_type == 'checkout.session.completed':
-        logger.info('🔔 Payment succeeded!')
-        customer_id = data_object.get('customer')  # Use the customer ID directly
+        logger.info("🔔 Processing checkout.session.completed event")
+        logger.debug(f"Event data: {data_object}")
+
+        customer_id = data_object.get('customer')
         subscription_id = data_object.get('subscription')
         start_date = data_object.get('created')
+        client_reference_id = data_object.get('client_reference_id')
 
-        if customer_id and subscription_id:
+        logger.debug(f"Extracted customer_id: {customer_id}, subscription_id: {subscription_id}, start_date: {start_date}, client_reference_id: {client_reference_id}")
+
+        if client_reference_id:
+            try:
+                user_id = str(uuid.UUID(client_reference_id))
+                logger.info(f"Converted client_reference_id to UUID: {user_id}")
+
+                logger.info("Fetching user profile from the database using client_reference_id")
+                response = requests.get(
+                    f"{SUPABASE_URL}/rest/v1/user_profiles",
+                    headers=headers,
+                    params={"id": f"eq.{user_id}"}
+                )
+                logger.debug(f"Database response: {response.status_code}, {response.text}")
+
+                if response.status_code == 200 and response.json():
+                    logger.info("User profile found. Updating subscription_type to premium.")
+                    update_response = requests.patch(
+                        f"{SUPABASE_URL}/rest/v1/user_profiles",
+                        headers=headers,
+                        json={"subscription_type": "premium"},
+                        params={"id": f"eq.{user_id}"}
+                    )
+                    logger.debug(f"Update subscription_type response: {update_response.status_code}, {update_response.text}")
+
+                    if update_response.status_code in [200, 204]:
+                        logger.info("User subscription type updated to premium.")
+                    else:
+                        logger.error("Failed to update user subscription type.")
+                else:
+                    logger.error("User profile not found for the given client_reference_id.")
+            except ValueError:
+                logger.error("Invalid client_reference_id format. Must be a valid UUID.")
+        else:
+            logger.error("Missing client_reference_id in checkout.session.completed event.")
+
+    elif event_type == 'customer.subscription.trial_will_end':
+        logger.info('Subscription trial will end')
+        subscription_id = data_object.get('id')
+
+        if subscription_id:
+            # Update subscription status in the database
+            response = requests.patch(
+                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
+                headers=headers,
+                json={"status": "trial_will_end"},
+                params={"id": f"eq.{subscription_id}"}
+            )
+            if response.status_code not in [200, 204]:
+                logger.error(f"Failed to update subscription: {response.text}")
+
+    elif event_type == 'customer.subscription.created':
+        logger.info(f'Subscription created: {data_object}')
+        subscription_id = data_object.get('id')
+        customer_id = data_object.get('customer')
+        start_date = data_object.get('start_date')
+
+        if subscription_id and customer_id:
             # Fetch user_id from the database using the customer_id
             response = requests.get(
                 f"{SUPABASE_URL}/rest/v1/users",
@@ -317,50 +377,24 @@ async def webhook_received(request: Request):
                 )
                 if response.status_code in [200, 201]:
                     logger.info(f"Successfully inserted subscription: {response.json()}")
+
+                    # Update the user's subscription_type to premium
+                    update_response = requests.patch(
+                        f"{SUPABASE_URL}/rest/v1/users",
+                        headers=headers,
+                        json={"subscription_type": "premium"},
+                        params={"id": f"eq.{user_id}"}
+                    )
+                    if update_response.status_code in [200, 204]:
+                        logger.info("User subscription type updated to premium.")
+                    else:
+                        logger.error(f"Failed to update user subscription type: {update_response.text}")
                 else:
                     logger.error(f"Failed to insert subscription: {response.text}")
             else:
                 logger.error("User not found for the given customer ID.")
         else:
-            logger.error("Missing customer_id or subscription_id in checkout.session.completed event.")
-
-    elif event_type == 'customer.subscription.trial_will_end':
-        logger.info('Subscription trial will end')
-        subscription_id = data_object.get('id')
-
-        if subscription_id:
-            # Update subscription status in the database
-            response = requests.patch(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers=headers,
-                json={"status": "trial_will_end"},
-                params={"id": f"eq.{subscription_id}"}
-            )
-            if response.status_code not in [200, 204]:
-                logger.error(f"Failed to update subscription: {response.text}")
-
-    elif event_type == 'customer.subscription.created':
-        logger.info(f'Subscription created: {data_object}')
-        subscription_id = data_object.get('id')
-        user_id = data_object.get('customer')
-        start_date = data_object.get('start_date')
-
-        if subscription_id and user_id:
-            # Insert subscription into the database
-            response = requests.post(
-                f"{SUPABASE_URL}/rest/v1/user_subscriptions",
-                headers=headers,
-                json={
-                    "id": subscription_id,
-                    "user_id": user_id,
-                    "start_date": start_date,
-                    "status": "active"
-                }
-            )
-            if response.status_code in [200, 201]:
-                logger.info(f"Successfully inserted subscription: {response.json()}")
-            else:
-                logger.error(f"Failed to insert subscription: {response.text}")
+            logger.error("Missing subscription_id or customer_id in customer.subscription.created event.")
 
     elif event_type == 'customer.subscription.updated':
         logger.info(f'Subscription updated: {data_object}')
